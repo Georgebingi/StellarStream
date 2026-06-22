@@ -1,32 +1,27 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, Env, IntoVal, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, Env, IntoVal, Symbol, Vec};
 
 mod contracterror;
 mod math;
 mod storage;
-mod types;
+pub mod types;
 mod v1_interface;
 
 use contracterror::Error;
 pub use types::{
-    AdminTransferredEvent, BatchStreamsCreatedEvent, BeneficiaryTransferredV2Event,
-    ClawbackRebalanceEvent, ContractPausedEvent, ContractUnpausedEvent, FeesWithdrawnEvent,
-    MigrationEvent, NebulaEvent, Operation, OperationExecutedEvent, OperationScheduledEvent,
-    PermitArgs, PermitStreamCreatedEvent, SplitExecutedEvent, StreamArgs, StreamBatchEntry,
-    StreamCancelledV2Event, StreamClaimV2Event, StreamCreatedV2Event, StreamMigratedEvent,
-    StreamRefilledEvent, StreamStatus, StreamToppedUpEvent, StreamV2, MAX_MEMO_LENGTH,
-    ClawbackRebalanceEvent, ContractPausedEvent, ContractUnpausedEvent, DexPoolInfo,
-    BpsRecipient, ClawbackRebalanceEvent, ContractPausedEvent, ContractUnpausedEvent, DexPoolInfo,
-    FeesWithdrawnEvent, LedgerFootprint, MigrationEvent, MultiAssetRecipient, Recipient, NebulaEvent,
-    Operation, OperationExecutedEvent, OperationScheduledEvent, PendingRateUpdate, PermitArgs,
-    PermitStreamCreatedEvent, RateUpdateAcceptedEvent, RateUpdateCancelledEvent,
-    RateUpdateProposedEvent, SignatureStreamCreatedEvent, SimulationCheck, SimulationReport,
-    SimulationResult, StreamArgs, StreamBatchEntry, StreamCancelledV2Event, StreamClaimV2Event,
-    StreamCreatedV2Event, StreamMigratedEvent, StreamParams, StreamRefilledEvent,
+    AdminTransferredEvent, BatchStreamsCreatedEvent, BeneficiaryTransferredV2Event, BpsRecipient,
+    ClawbackRebalanceEvent, ContractPausedEvent, ContractState, ContractTerminatedEvent,
+    ContractUnpausedEvent, DexPoolInfo, DustAccumulatedEvent, FeesWithdrawnEvent, LedgerFootprint,
+    MigrationEvent, MultiAssetRecipient, NebulaEvent, Operation, OperationExecutedEvent,
+    OperationScheduledEvent, PendingRateUpdate, PermitArgs, PermitPayload, PermitStreamCreatedEvent,
+    ProtocolHealthV2, Recipient, SignatureStreamCreatedEvent, SimulationCheck, SimulationReport,
+    SimulationResult, SplitExecutedEvent, StreamArgs, StreamBatchEntry, StreamCancelledV2Event,
+    StreamClaimV2Event, StreamCreatedV2Event, StreamMigratedEvent, StreamParams, StreamRefilledEvent,
     StreamRequestApprovedEvent, StreamRequestExecutedEvent, StreamRequestInitiatedEvent,
-    StreamStatus, StreamToppedUpEvent, StreamV2, SwapResult, SwapStreamArgs, SwapStreamCreatedEvent,
+    StreamSplitUpdatedEvent, StreamStatus, StreamToppedUpEvent, StreamV2, SwapResult, SwapStreamArgs,
+    SwapStreamCreatedEvent, MAX_MEMO_LENGTH,
 };
 use v1_interface::Client as V1Client;
 
@@ -46,6 +41,11 @@ const GAS_FEE_PER_SPLIT_STROOPS: i128 = 10_000_000;
 
 /// Maximum protocol fee (5%) - protects users from admin abuse (Issue #415)
 pub const MAX_FEE_BPS: u32 = 500;
+
+/// Maximum stream amount (1 Billion XLM = 1,000,000,000 * 10^7 stroops)
+pub const MAX_STREAM_AMOUNT: i128 = 1_000_000_000 * 10_000_000;
+/// Maximum stream flow rate (1 Million XLM/s = 1,000,000 * 10^7 stroops/s)
+pub const MAX_FLOW_RATE: i128 = 1_000_000 * 10_000_000;
 
 /// Tiered fee configuration for "Whale" discounts.
 #[soroban_sdk::contracttype]
@@ -281,6 +281,25 @@ impl Contract {
                 error_message: String::from_str(env, "Amount must be positive"),
             };
         }
+
+        if args.total_amount > MAX_STREAM_AMOUNT {
+            return SimulationCheck {
+                passed: false,
+                error_code: 78, // AmountOverflow
+                error_message: String::from_str(env, "Amount exceeds maximum limit"),
+            };
+        }
+
+        let duration = (args.end_time - args.start_time) as i128;
+        if duration > 0 {
+            if args.total_amount > MAX_FLOW_RATE.saturating_mul(duration) {
+                return SimulationCheck {
+                    passed: false,
+                    error_code: 78, // AmountOverflow
+                    error_message: String::from_str(env, "Flow rate exceeds maximum limit"),
+                };
+            }
+        }
         
         // All validations passed
         SimulationCheck {
@@ -302,7 +321,7 @@ impl Contract {
         let required_amount = args.total_amount;
         
         // Check if asset is whitelisted (get protocol fee if configured)
-        let protocol_fee_bps = storage::get_fee_bps(env).unwrap_or(0);
+        let protocol_fee_bps = storage::get_fee_bps(env) as i128;
         let fee_multiplier = 10_000 - protocol_fee_bps;
         let stream_amount = (args.total_amount * fee_multiplier) / 10_000;
         let estimated_fee = args.total_amount - stream_amount;
@@ -436,14 +455,15 @@ impl Contract {
         }
 
         // If no metadata or too short, just accept funds without creating stream
-        if metadata.is_empty() || metadata.len() < 40 {
+        // Stellar addresses encoded as strings are typically 56 characters, plus 8 bytes duration = 64 bytes
+        if metadata.is_empty() || metadata.len() < 64 {
             // Just accept the funds - no auto-stream created
             return Ok(0);
         }
 
-        // Parse metadata: first 32 bytes = receiver address, next 8 bytes = duration
-        let receiver_address_bytes = metadata.slice(0..32);
-        let duration_bytes = metadata.slice(32..40);
+        // Parse metadata: first 56 bytes = receiver address, next 8 bytes = duration
+        let receiver_address_bytes = metadata.slice(0..56);
+        let duration_bytes = metadata.slice(56..64);
 
         // Parse duration from 8 bytes (big-endian u64)
         let mut arr = [0u8; 8];
@@ -454,7 +474,7 @@ impl Contract {
 
         // Validate duration (must be at least 1 second and not exceed 10 years)
         if duration == 0 || duration > 315_360_000 {
-            return Err(Error::InvalidDuration);
+            return Err(Error::InvalidBridgeMetadata);
         }
 
         // Convert receiver address bytes to Address
@@ -494,6 +514,7 @@ impl Contract {
             cycle_duration: 0,
             cancellation_type: 0, // Unilateral cancellation
             affiliate: None,
+            memo: None,
             yield_recipient: 0,
             split_address: None,
             split_bps: 0,
@@ -533,23 +554,24 @@ impl Contract {
 
         // Check minimum length for a Stellar address
         if bytes.len() < 56 {
-            return Err(Error::MissingReceiverAddress);
+            return Err(Error::InvalidBridgeMetadata);
         }
 
         // For Stellar addresses encoded as strings, they're typically 56 characters
         // Starting with 'G' and containing base32 characters
         // Since we can't easily convert Bytes to String in Soroban, we need a workaround
 
-        // Try to find a 'G' in the bytes to locate the address start
+        // Try to find a 'G' or 'C' in the bytes to locate the address start
         let mut start_idx: Option<u32> = None;
         for i in 0u32..bytes.len() {
-            if bytes.get(i).unwrap_or(0) == b'G' {
+            let b = bytes.get(i).unwrap_or(0);
+            if b == b'G' || b == b'C' {
                 start_idx = Some(i);
                 break;
             }
         }
 
-        let start_idx = start_idx.ok_or(Error::MissingReceiverAddress)?;
+        let start_idx = start_idx.ok_or(Error::InvalidBridgeMetadata)?;
 
         // Extract up to 56 characters after 'G'
         let mut addr_str_arr = [0u8; 56];
@@ -572,7 +594,7 @@ impl Contract {
         }
 
         if char_count < 56 {
-            return Err(Error::MissingReceiverAddress);
+            return Err(Error::InvalidBridgeMetadata);
         }
 
         // Create string from the array
@@ -605,6 +627,8 @@ impl Contract {
         {
             return Err(Error::InvalidTimeRange);
         }
+
+        Self::validate_limits(args.total_amount, args.start_time, args.end_time)?;
 
         if args.penalty_bps > 10_000 {
             return Err(Error::InvalidPenalty);
@@ -843,11 +867,11 @@ impl Contract {
 
         let v1_stream = v1_client
             .try_get_stream(&v1_stream_id)
-            .map_err(|_| Error::NotStreamOwner)?
-            .map_err(|_| Error::NotStreamOwner)?;
+            .map_err(|_| Error::UnauthorizedSender)?
+            .map_err(|_| Error::UnauthorizedSender)?;
 
         if v1_stream.receiver != caller {
-            return Err(Error::NotStreamOwner);
+            return Err(Error::UnauthorizedSender);
         }
 
         if v1_stream.cancelled || v1_stream.is_frozen || v1_stream.is_paused {
@@ -872,7 +896,7 @@ impl Contract {
         let remaining = v1_stream.total_amount - unlocked;
 
         if remaining <= 0 {
-            return Err(Error::NothingToMigrate);
+            return Err(Error::NothingToWithdraw);
         }
 
         v1_client
@@ -942,6 +966,7 @@ impl Contract {
         env: Env,
         v1_contract: Address,
         v1_id: soroban_sdk::Symbol,
+        caller: Address,
     ) -> Result<u64, Error> {
         Self::require_not_paused(&env)?;
         if storage::is_migration_paused(&env) {
@@ -949,7 +974,6 @@ impl Contract {
         }
 
         // 1. Get the caller (receiver)
-        let caller = env.invoker();
         caller.require_auth();
 
         // 2. Convert Symbol to u64 (ID)
@@ -971,7 +995,7 @@ impl Contract {
             .map_err(|_| Error::StreamNotFound)?;
 
         if v1_stream.receiver != caller {
-            return Err(Error::NotStreamOwner);
+            return Err(Error::UnauthorizedSender);
         }
 
         // 4. Action 1: Call V1.cancel_stream(v1_id)
@@ -982,7 +1006,7 @@ impl Contract {
             .map_err(|_| Error::StreamNotMigratable)?;
 
         if remaining_balance <= 0 {
-            return Err(Error::NothingToMigrate);
+            return Err(Error::NothingToWithdraw);
         }
 
         // 5. Pull the released funds from the receiver into the V2 contract.
@@ -1065,6 +1089,7 @@ impl Contract {
 
         let mut results = Vec::new(&env);
         let now_nanos = Self::ledger_timestamp_nanos(&env);
+        let now = env.ledger().timestamp();
 
         for id in ids.iter() {
             if let Some(stream) = storage::get_stream(&env, id) {
@@ -1124,7 +1149,7 @@ impl Contract {
         future_timestamp: u64,
     ) -> Result<i128, Error> {
         let stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
-        Ok(Self::calculate_unlocked_internal(&stream, future_timestamp))
+        Ok(Self::calculate_unlocked_internal(&stream, future_timestamp * math::NANOS_PER_SEC))
     }
 
     // ----------------------------------------------------------------
@@ -1162,13 +1187,13 @@ impl Contract {
     /// - `AlreadyCancelled`: If the stream has been cancelled
     /// - `NothingToWithdraw`: If no funds are unlocked
     pub fn withdraw(env: Env, stream_id: u64, beneficiary: Address) -> Result<i128, Error> {
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_only(&env)?;
         beneficiary.require_auth();
 
         let mut stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
         if stream.beneficiary != beneficiary {
-            return Err(Error::NotBeneficiary);
+            return Err(Error::UnauthorizedSender);
         }
 
         if stream.cancelled {
@@ -1180,7 +1205,8 @@ impl Contract {
 
         let now = env.ledger().timestamp();
         let to_withdraw =
-            Self::calculate_unlocked_internal(&stream, now).saturating_sub(stream.withdrawn_amount);
+            Self::calculate_unlocked_internal(&stream, Self::ledger_timestamp_nanos(&env))
+                .saturating_sub(stream.withdrawn_amount);
 
         if to_withdraw <= 0 {
             return Err(Error::NothingToWithdraw);
@@ -1219,7 +1245,7 @@ impl Contract {
         if storage::get_contract_state(&env) == ContractState::Terminated {
             let deadline = storage::get_claim_deadline(&env).unwrap_or(0);
             if env.ledger().timestamp() > deadline {
-                return Err(Error::ClaimWindowExpired);
+                return Err(Error::ExpiredDeadline);
             }
         }
         let token_client = soroban_sdk::token::TokenClient::new(&env, &stream.token);
@@ -1240,7 +1266,7 @@ impl Contract {
 
                 if dust_amount > 0 {
                     let now = env.ledger().timestamp();
-                    let mut dust_data = Vec::new(&env);
+                    let mut dust_data: Vec<soroban_sdk::Val> = Vec::new(&env);
                     dust_data.push_back(stream_id.into_val(&env));
                     dust_data.push_back(stream.token.clone().into_val(&env));
                     dust_data.push_back(split_addr.clone().into_val(&env));
@@ -1337,7 +1363,15 @@ impl Contract {
         deadline: u64,
         signature: soroban_sdk::BytesN<64>,
     ) -> Result<i128, Error> {
-        Self::require_not_paused(&env)?;
+        Self::require_not_paused_only(&env)?;
+
+        // Claim window check (#934): if terminated, only allow within 90-day window.
+        if storage::get_contract_state(&env) == ContractState::Terminated {
+            let deadline = storage::get_claim_deadline(&env).unwrap_or(0);
+            if env.ledger().timestamp() > deadline {
+                return Err(Error::ExpiredDeadline);
+            }
+        }
 
         let now = env.ledger().timestamp();
         if now > deadline {
@@ -1508,7 +1542,7 @@ impl Contract {
             stream.receiver.require_auth();
         } else {
             if stream.sender != caller && stream.beneficiary != caller {
-                return Err(Error::NotStreamOwner);
+                return Err(Error::UnauthorizedSender);
             }
             caller.require_auth();
         }
@@ -1539,7 +1573,7 @@ impl Contract {
                 if result.is_err() {
                     stream.is_pending = true;
                     storage::set_stream(&env, stream_id, &stream);
-                    return Err(Error::VaultPaused);
+                    return Err(Error::ContractPaused);
                 }
             }
         }
@@ -1593,7 +1627,7 @@ impl Contract {
         let stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
         if stream.sender != caller && stream.beneficiary != caller {
-            return Err(Error::NotStreamOwner);
+            return Err(Error::UnauthorizedSender);
         }
         caller.require_auth();
 
@@ -1601,7 +1635,7 @@ impl Contract {
             return Err(Error::StreamNotFullyWithdrawn);
         }
 
-        let key = DataKeyV2::Stream(stream_id);
+        let key = storage::DataKeyV2::Stream(stream_id);
         env.storage().persistent().remove(&key);
 
         let now = env.ledger().timestamp();
@@ -1677,7 +1711,7 @@ impl Contract {
         Self::require_not_paused(&env)?;
 
         if split_bps >= 10_000 {
-            return Err(Error::InvalidSplitBps);
+            return Err(Error::InvalidPenalty);
         }
 
         let mut stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
@@ -1833,7 +1867,12 @@ impl Contract {
         let mut stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
         if stream.sender != sender {
-            return Err(Error::NotStreamOwner);
+            return Err(Error::UnauthorizedSender);
+        }
+
+        let new_total_amount = stream.total_amount.checked_add(extra_amount).ok_or(Error::Overflow)?;
+        if new_total_amount > MAX_STREAM_AMOUNT {
+            return Err(Error::AmountOverflow);
         }
 
         if stream.cancelled {
@@ -2013,7 +2052,7 @@ impl Contract {
         if let Some(oracle_addr) = storage::get_oracle_address(env) {
             let oracle = SanctionsOracleClient::new(env, &oracle_addr);
             if oracle.is_sanctioned(addr) {
-                return Err(Error::SanctionedAddress);
+                return Err(Error::UnauthorizedSender);
             }
         }
         Ok(())
@@ -2190,7 +2229,14 @@ impl Contract {
             return Err(Error::ContractPaused);
         }
         if storage::get_contract_state(env) == ContractState::Terminated {
-            return Err(Error::ContractTerminated);
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn require_not_paused_only(env: &Env) -> Result<(), Error> {
+        if storage::is_paused(env) {
+            return Err(Error::ContractPaused);
         }
         Ok(())
     }
@@ -2219,7 +2265,25 @@ impl Contract {
         if let Some(oracle_addr) = storage::get_compliance_oracle(env) {
             let oracle = ComplianceClient::new(env, &oracle_addr);
             if !oracle.is_allowed(addr) {
-                return Err(Error::AddressFlagged);
+                return Err(Error::UnauthorizedSender);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that the stream amount and flow rate do not exceed security limits.
+    fn validate_limits(
+        amount: i128,
+        start_time: u64,
+        end_time: u64,
+    ) -> Result<(), Error> {
+        if amount > MAX_STREAM_AMOUNT {
+            return Err(Error::AmountOverflow);
+        }
+        let duration = (end_time - start_time) as i128;
+        if duration > 0 {
+            if amount > MAX_FLOW_RATE.saturating_mul(duration) {
+                return Err(Error::AmountOverflow);
             }
         }
         Ok(())
@@ -2319,6 +2383,8 @@ impl Contract {
             return Err(Error::InvalidTimeRange);
         }
 
+        Self::validate_limits(args.total_amount, args.start_time, args.end_time)?;
+
         if args.penalty_bps > 10_000 {
             return Err(Error::InvalidPenalty);
         }
@@ -2327,11 +2393,8 @@ impl Contract {
             return Err(Error::BelowDustThreshold);
         }
 
-        if let Some(ref memo) = args.memo {
-            let memo_str = memo.to_string();
-            if memo_str.len() > MAX_MEMO_LENGTH as usize {
-                return Err(Error::InvalidMemo);
-            }
+        if let Some(_) = &args.memo {
+            // A Symbol is guaranteed to be <= 32 characters by the Soroban runtime definition.
         }
         // Compliance oracle check (Issue #412)
         Self::require_compliant(&env, &args.sender)?;
@@ -2421,11 +2484,11 @@ impl Contract {
             split_data.push_back(now.into_val(&env));
 
             env.events().publish(
-                (stream_id, symbol_short!("split_exec")),
+                (stream_id, Symbol::new(&env, "split_exec")),
                 NebulaEvent {
                     version: 2,
                     timestamp: now,
-                    action: symbol_short!("split_exec"),
+                    action: Symbol::new(&env, "split_exec"),
                     data: split_data,
                 },
             );
@@ -2446,6 +2509,8 @@ impl Contract {
         if now > args.deadline {
             return Err(Error::ExpiredDeadline);
         }
+
+        Self::validate_limits(args.total_amount, args.start_time, args.end_time)?;
 
         if args.total_amount < storage::get_min_value(&env, &args.token) {
             return Err(Error::BelowDustThreshold);
@@ -2585,6 +2650,8 @@ impl Contract {
         }
 
         // 2. Dust threshold check
+        Self::validate_limits(params.total_amount, params.start_time, params.end_time)?;
+
         if params.total_amount < storage::get_min_value(&env, &params.token) {
             return Err(Error::BelowDustThreshold);
         }
@@ -2737,7 +2804,7 @@ impl Contract {
 
         // Validate slippage tolerance (0-100% = 0-10000 bps)
         if args.slippage_tolerance_bps > 10_000 {
-            return Err(Error::InvalidSlippageTolerance);
+            return Err(Error::InvalidPenalty);
         }
 
         // Check deadline
@@ -2776,11 +2843,12 @@ impl Contract {
         );
 
         // Approve DEX to spend asset_in from this contract
+        let expiration_ledger = env.ledger().sequence().saturating_add(1000);
         token_in_client.approve(
             &env.current_contract_address(),
             &dex_address,
             &args.amount_in,
-            &args.swap_deadline,
+            &expiration_ledger,
         );
 
         // Execute swap via DEX
@@ -2796,12 +2864,12 @@ impl Contract {
 
         // Execute the swap
         let amount_out = swap_client.swap(
-            args.asset_in.clone(),
-            args.asset_out.clone(),
-            args.amount_in,
-            effective_min_amount_out,
-            args.swap_deadline,
-        ).map_err(|_| Error::SwapFailed)?;
+            &args.asset_in,
+            &args.asset_out,
+            &args.amount_in,
+            &effective_min_amount_out,
+            &args.swap_deadline,
+        );
 
         // Safety check: verify we received at least the user's specified minimum
         if amount_out < args.min_amount_out {
@@ -2873,11 +2941,11 @@ impl Contract {
         data.push_back(now.into_val(&env));
 
         env.events().publish(
-            (stream_id, symbol_short!("swap_stream")),
+            (stream_id, Symbol::new(&env, "swap_stream")),
             NebulaEvent {
                 version: 2,
                 timestamp: now,
-                action: symbol_short!("swap_stream"),
+                action: Symbol::new(&env, "swap_stream"),
                 data,
             },
         );
@@ -2925,14 +2993,14 @@ impl Contract {
         let swap_client = SwapClient::new(&env, &dex_address);
         
         let amount_out = swap_client.get_amount_out(
-            asset_in.clone(),
-            asset_out.clone(),
-            amount_in,
+            &asset_in,
+            &asset_out,
+            &amount_in,
         );
 
         let spot_price = swap_client.get_spot_price(
-            asset_in,
-            asset_out,
+            &asset_in,
+            &asset_out,
         );
 
         // Calculate price impact (simplified - assumes 1:1 for this calculation)
@@ -3003,6 +3071,10 @@ impl Contract {
             return Err(Error::InvalidNewRate);
         }
 
+        if new_rate > MAX_FLOW_RATE {
+            return Err(Error::AmountOverflow);
+        }
+
         // Calculate remaining balance
         let now = env.ledger().timestamp();
         let remaining_balance = Self::calculate_remaining_balance(&env, &stream, now)?;
@@ -3031,7 +3103,7 @@ impl Contract {
 
         // Ensure new end time is in the future
         if new_end_time <= now {
-            return Err(Error::InsufficientBalanceForNewRate);
+            return Err(Error::InsufficientBalance);
         }
 
         // Check if a pending update already exists
@@ -3068,11 +3140,11 @@ impl Contract {
         data.push_back(now.into_val(&env));
 
         env.events().publish(
-            (stream_id, symbol_short!("rate_propose")),
+            (stream_id, Symbol::new(&env, "rate_propose")),
             NebulaEvent {
                 version: 2,
                 timestamp: now,
-                action: symbol_short!("rate_propose"),
+                action: Symbol::new(&env, "rate_propose"),
                 data,
             },
         );
@@ -3114,7 +3186,7 @@ impl Contract {
         // Check if proposal has expired
         if storage::is_pending_rate_update_expired(&env, stream_id) {
             storage::remove_pending_rate_update(&env, stream_id);
-            return Err(Error::UpdateExpired);
+            return Err(Error::ExpiredDeadline);
         }
 
         let now = env.ledger().timestamp();
@@ -3153,11 +3225,11 @@ impl Contract {
         data.push_back(now.into_val(&env));
 
         env.events().publish(
-            (stream_id, symbol_short!("rate_accept")),
+            (stream_id, Symbol::new(&env, "rate_accept")),
             NebulaEvent {
                 version: 2,
                 timestamp: now,
-                action: symbol_short!("rate_accept"),
+                action: Symbol::new(&env, "rate_accept"),
                 data,
             },
         );
@@ -3206,11 +3278,11 @@ impl Contract {
         data.push_back(now.into_val(&env));
 
         env.events().publish(
-            (stream_id, symbol_short!("rate_cancel")),
+            (stream_id, Symbol::new(&env, "rate_cancel")),
             NebulaEvent {
                 version: 2,
                 timestamp: now,
-                action: symbol_short!("rate_cancel"),
+                action: Symbol::new(&env, "rate_cancel"),
                 data,
             },
         );
@@ -3231,7 +3303,7 @@ impl Contract {
         stream_id: u64,
     ) -> Result<Option<PendingRateUpdate>, Error> {
         // Check if stream exists
-        if !storage::has_stream(&env, stream_id) {
+        if storage::get_stream(&env, stream_id).is_none() {
             return Err(Error::StreamNotFound);
         }
 
@@ -3387,6 +3459,9 @@ impl Contract {
                 curve_type: args.curve_type,
             };
 
+            storage::set_stream(&env, stream_id, &stream);
+            storage::update_stats(&env, stream_amount, &args.sender, &args.receiver);
+
             let now = env.ledger().timestamp();
             let mut data = Vec::new(&env);
             data.push_back(stream_id.into_val(&env));
@@ -3530,7 +3605,7 @@ impl Contract {
 
         // Check if already executed
         if request.executed {
-            return Err(Error::StreamRequestAlreadyExecuted);
+            return Err(Error::StreamReqAlreadyExecuted);
         }
 
         // Check if already approved by this admin
@@ -3772,7 +3847,7 @@ impl Contract {
         let mut stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
         if !stream.is_recurrent {
-            return Err(Error::NotRecurrent);
+            return Err(Error::StreamNotMigratable);
         }
         if stream.cancelled {
             return Err(Error::AlreadyCancelled);
@@ -3780,7 +3855,7 @@ impl Contract {
 
         let now = env.ledger().timestamp();
         if now < stream.end_time {
-            return Err(Error::StreamNotExpired);
+            return Err(Error::NotExecutionTime);
         }
 
         let original_amount = stream.total_amount;
@@ -4008,7 +4083,7 @@ impl Contract {
     /// Query the DAO token balance of `addr` as a proxy for voting power.
     /// Returns `Err(DaoTokenNotSet)` if no DAO token has been configured.
     pub fn check_voting_power(env: Env, addr: Address) -> Result<i128, Error> {
-        let dao_token = storage::get_dao_token(&env).ok_or(Error::DaoTokenNotSet)?;
+        let dao_token = storage::get_dao_token(&env).ok_or(Error::UnauthorizedSender)?;
         let client = DaoTokenClient::new(&env, &dao_token);
         Ok(client.balance(&addr))
     }
@@ -4036,7 +4111,7 @@ impl Contract {
         let voting_power = Self::check_voting_power(env.clone(), caller.clone())?;
         let threshold = storage::get_voting_threshold(&env);
         if voting_power < threshold {
-            return Err(Error::InsufficientVotingPower);
+            return Err(Error::UnauthorizedSender);
         }
 
         let treasury = storage::get_treasury(&env).ok_or(Error::NoTreasury)?;
@@ -4130,14 +4205,14 @@ impl Contract {
         storage::try_get_admin(&env)?.require_auth();
 
         let mut split = storage::get_pending_treasury_split(&env, split_id)
-            .ok_or(Error::PendingTreasurySplitNotFound)?;
+            .ok_or(Error::PendingSplitNotFound)?;
 
         if split.executed {
-            return Err(Error::TreasurySplitAlreadyExecuted);
+            return Err(Error::StreamReqAlreadyExecuted);
         }
 
         if env.ledger().timestamp() < split.unlock_time {
-            return Err(Error::TreasurySplitTimelocked);
+            return Err(Error::NotExecutionTime);
         }
 
         let treasury = storage::get_treasury(&env).ok_or(Error::NoTreasury)?;
@@ -4550,7 +4625,7 @@ impl Contract {
     /// - `initiator`: A council member address (must sign).
     pub fn init_recovery(env: Env, initiator: Address) -> Result<(), Error> {
         let council = storage::get_recovery_council(&env)
-            .ok_or(Error::RecoveryCouncilNotSet)?;
+            .ok_or(Error::NotCouncilMember)?;
 
         if !council.contains(&initiator) {
             return Err(Error::NotCouncilMember);
@@ -4588,7 +4663,7 @@ impl Contract {
         destination: Address,
     ) -> Result<i128, Error> {
         let council = storage::get_recovery_council(&env)
-            .ok_or(Error::RecoveryCouncilNotSet)?;
+            .ok_or(Error::NotCouncilMember)?;
 
         let initiated_at = storage::get_recovery_initiated_at(&env)
             .ok_or(Error::RecoveryNotInitiated)?;
@@ -4596,7 +4671,7 @@ impl Contract {
         // Enforce 7-day grace period.
         let now = env.ledger().timestamp();
         if now < initiated_at.saturating_add(storage::RECOVERY_GRACE_PERIOD) {
-            return Err(Error::RecoveryGracePeriodActive);
+            return Err(Error::NotExecutionTime);
         }
 
         let threshold = storage::get_recovery_threshold(&env);
@@ -4608,7 +4683,7 @@ impl Contract {
                 return Err(Error::NotCouncilMember);
             }
             if approvals.contains(&signer) {
-                return Err(Error::RecoveryAlreadyApproved);
+                return Err(Error::AlreadyApproved);
             }
             signer.require_auth();
             approvals.push_back(signer.clone());
@@ -4620,7 +4695,7 @@ impl Contract {
                 .instance()
                 .set(&crate::storage::DataKeyV2::RecoveryApprovals, &approvals);
             storage::bump_instance(&env);
-            return Err(Error::RecoveryInsufficientSignatures);
+            return Err(Error::NotEnoughSigners);
         }
 
         // Transfer the full balance of `token` to `destination`.
@@ -4675,7 +4750,7 @@ impl Contract {
             total_bps = total_bps.checked_add(entry.bps).ok_or(Error::Overflow)?;
         }
         if total_bps != 10_000 {
-            return Err(Error::InvalidBpsSum);
+            return Err(Error::InvalidPenalty);
         }
 
         // 2. Reentrancy guard

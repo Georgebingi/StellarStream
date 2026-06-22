@@ -1,6 +1,6 @@
 use crate::contracterror::Error;
 use crate::types::{PendingRateUpdate, StreamV2};
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, Env, Symbol, Vec};
 
 const STATUS_ACTIVE: u8 = 0;
 const STATUS_CANCELLED: u8 = 1;
@@ -162,6 +162,7 @@ pub enum DataKeyV2 {
 
     // -- Issue #938 — Variable-Fee Tiered Logic -----------------------
     FeeTiers, // 35
+    EventLog(u64), // 36
 }
 
 /// Global stream counter.
@@ -231,7 +232,7 @@ pub fn get_admin_list(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
         .get(&DataKeyV2::AdminList)
-        .unwrap_or_else(|| env.panic_with_error(Error::AdminListNotSet))
+        .unwrap_or_else(|| env.panic_with_error(Error::UnauthorizedSender))
 }
 
 pub fn try_get_admin_list(env: &Env) -> Result<Vec<Address>, Error> {
@@ -239,7 +240,7 @@ pub fn try_get_admin_list(env: &Env) -> Result<Vec<Address>, Error> {
     env.storage()
         .instance()
         .get(&DataKeyV2::AdminList)
-        .ok_or(Error::AdminListNotSet)
+        .ok_or(Error::UnauthorizedSender)
 }
 
 /// Return the approval threshold.
@@ -1057,4 +1058,64 @@ pub fn set_oracle_address(env: &Env, oracle: &Address) {
 
 pub fn get_oracle_address(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKeyV2::OracleAddress)
+}
+
+pub fn append_event_log(env: &Env, stream_id: u64, data: Bytes) {
+    let key = DataKeyV2::EventLog(stream_id);
+    let mut log: Vec<Bytes> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
+    if log.len() >= 50 {
+        log.remove(0);
+    }
+    log.push_back(data);
+    env.storage().persistent().set(&key, &log);
+}
+
+pub fn get_event_log(env: &Env, stream_id: u64) -> Vec<Bytes> {
+    let key = DataKeyV2::EventLog(stream_id);
+    env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_dao_token(env: &Env, token: &Address) {
+    env.storage().instance().set(&DataKeyV2::DaoToken, token);
+    bump_instance(env);
+}
+
+pub fn get_dao_token(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKeyV2::DaoToken)
+}
+
+pub fn set_voting_threshold(env: &Env, threshold: i128) {
+    env.storage().instance().set(&DataKeyV2::VotingThreshold, &threshold);
+    bump_instance(env);
+}
+
+pub fn get_voting_threshold(env: &Env) -> i128 {
+    env.storage().instance().get(&DataKeyV2::VotingThreshold).unwrap_or(0)
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingTreasurySplit {
+    pub initiator: Address,
+    pub token: Address,
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub unlock_time: u64,
+    pub executed: bool,
+}
+
+pub fn next_treasury_split_id(env: &Env) -> u64 {
+    let id: u64 = env.storage().instance().get(&DataKeyV2::TreasurySplitCount).unwrap_or(0);
+    env.storage().instance().set(&DataKeyV2::TreasurySplitCount, &(id + 1));
+    bump_instance(env);
+    id
+}
+
+pub fn set_pending_treasury_split(env: &Env, split_id: u64, split: &PendingTreasurySplit) {
+    env.storage().instance().set(&DataKeyV2::PendingTreasurySplit(split_id), split);
+    bump_instance(env);
+}
+
+pub fn get_pending_treasury_split(env: &Env, split_id: u64) -> Option<PendingTreasurySplit> {
+    env.storage().instance().get(&DataKeyV2::PendingTreasurySplit(split_id))
 }
