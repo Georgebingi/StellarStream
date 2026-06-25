@@ -5,8 +5,6 @@ const url = process.env["DATABASE_URL"] ?? "file:./dev.db";
 const adapter = new PrismaLibSql({ url });
 const prisma = new PrismaClient({ adapter });
 
-const SINGLETON_ID = 'singleton';
-
 /**
  * Returns the last successfully processed ledger sequence from the DB.
  * Returns 0 on first run (no checkpoint saved yet), so the indexer
@@ -14,8 +12,8 @@ const SINGLETON_ID = 'singleton';
  */
 export async function getLastLedgerSequence(): Promise<number> {
   try {
-    const record = await prisma.syncMetadata.findUnique({
-      where: { id: SINGLETON_ID },
+    const record = await prisma.syncState.findUnique({
+      where: { id: 1 },
     });
     return record?.lastLedgerSequence ?? 0;
   } catch (err) {
@@ -34,11 +32,11 @@ export async function getLastLedgerSequence(): Promise<number> {
  */
 export async function saveLastLedgerSequence(ledgerSequence: number): Promise<void> {
   try {
-    await prisma.syncMetadata.upsert({
-      where: { id: SINGLETON_ID },
+    await prisma.syncState.upsert({
+      where: { id: 1 },
       update: { lastLedgerSequence: ledgerSequence },
       create: {
-        id: SINGLETON_ID,
+        id: 1,
         lastLedgerSequence: ledgerSequence,
       },
     });

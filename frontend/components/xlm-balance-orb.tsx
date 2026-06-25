@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 
+import { AssetPrice } from "./AssetPrice";
+
 interface XLMBalanceOrbProps {
   balance: number;
   threshold?: number;
@@ -101,8 +103,13 @@ export default function XLMBalanceOrb({
           position: relative;
           animation: orb-pulse 2s ease-in-out infinite, float-gentle 3s ease-in-out infinite;
           transition: all 0.3s ease;
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
+        }
+
+        @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+          .xlm-orb {
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+          }
         }
 
         .xlm-orb:hover {
@@ -132,9 +139,7 @@ export default function XLMBalanceOrb({
           position: absolute;
           bottom: 70px;
           width: 320px;
-          background: rgba(10, 10, 20, 0.95);
-          backdrop-filter: blur(24px);
-          -webkit-backdrop-filter: blur(24px);
+          background: rgba(10, 10, 20, 0.97);
           border: 1px solid rgba(255, 165, 0, 0.3);
           border-radius: 20px;
           padding: 20px;
@@ -144,6 +149,14 @@ export default function XLMBalanceOrb({
             0 0 60px rgba(255, 165, 0, 0.1) inset;
           animation: bubble-expand 0.3s ease-out;
           color: #e8eaf6;
+        }
+
+        @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+          .xlm-bubble {
+            background: rgba(10, 10, 20, 0.95);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+          }
         }
 
         .xlm-bubble.position-left {
@@ -292,6 +305,22 @@ export default function XLMBalanceOrb({
           color: rgba(232, 234, 246, 0.9);
         }
 
+        @media (prefers-reduced-motion: reduce) {
+          .xlm-orb {
+            animation: none;
+          }
+          .xlm-orb::before {
+            animation: none;
+          }
+          .xlm-bubble {
+            animation: none;
+          }
+          .bubble-button,
+          .close-button {
+            transition: none;
+          }
+        }
+
         @media (max-width: 768px) {
           .xlm-bubble {
             width: 280px;
@@ -321,7 +350,7 @@ export default function XLMBalanceOrb({
           role="button"
           aria-label={`Low XLM balance warning. Current balance: ${balance.toFixed(2)} XLM. Click to learn more.`}
           tabIndex={0}
-          onKeyDown={(e) => {
+          onKeyDown={(e: React.KeyboardEvent) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               setIsExpanded(!isExpanded);
@@ -354,9 +383,7 @@ export default function XLMBalanceOrb({
             </div>
 
             <div className="bubble-balance">
-              <span className="balance-label">Current:</span>
-              <span className="balance-value">{balance.toFixed(2)}</span>
-              <span className="balance-unit">XLM</span>
+              <AssetPrice amount={balance} assetCode="XLM" />
             </div>
 
             <div className="bubble-message">

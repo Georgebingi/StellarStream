@@ -1,131 +1,139 @@
-# Soroban Transaction Pending Orb
+# StellarStream - Bulk Payment Processing
 
-A lightweight, performant floating UI component for Soroban blockchain transactions that displays a beautiful 3D-like orb with a "Hyper Violet" glow when awaiting wallet signature.
+A modern web application for processing bulk payments with an advanced recipient grid and bulk-edit utility bar.
 
 ## Features
 
-✓ **Lightweight & Performant**: Pure CSS animations, no heavy assets or libraries
-✓ **Fixed Position**: Bottom-right corner, non-blocking (pointer-events: none)
-✓ **3D Visual Effect**: Radial gradient orb with soft glow and highlight
-✓ **Smooth Animation**: Breathing effect using CSS transforms (scale)
-✓ **State-Driven**: Appears on `pending`, disappears immediately on `signed`/`rejected`
-✓ **Accessible**: ARIA live regions, proper roles, screen reader support
-✓ **Reduced Motion**: Respects `prefers-reduced-motion` preference
-✓ **No Layout Shifts**: Uses `contain: layout` for optimal performance
-✓ **Cross-Browser**: Compatible with modern browsers
-✓ **Memory Safe**: No memory leaks, clean effect cleanup
+### 🎯 Bulk-Edit Utility Bar
+- **Multi-select toolbar** that appears when 2+ rows are selected
+- **"Apply to All" functions** for Amount, Asset, and Memo fields
+- **Smart input validation** with appropriate input types for each field
+- **Floating design** that stays visible while scrolling
 
-## Installation
+### 📊 Recipient Grid
+- **Individual row selection** with checkbox controls
+- **Inline editing** for all recipient fields
+- **Visual feedback** for selected rows
+- **Responsive design** that works on all screen sizes
 
-```bash
-npm install
-```
+### 🚀 Core Functionality
+- Add/remove recipients dynamically
+- Import/Export CSV support (UI ready)
+- Real-time validation and updates
+- Clean, modern UI with Tailwind CSS
 
-## Usage
+## Technical Implementation
 
-```tsx
-import { TransactionPendingOrb, WalletStatus } from './components/TransactionPendingOrb';
+### Components
 
-function MyApp() {
-  const [walletStatus, setWalletStatus] = useState<WalletStatus>('idle');
+#### `BulkEditBar.tsx`
+- **Smart visibility**: Only shows when 2+ recipients are selected
+- **Action modes**: Amount, Asset, and Memo editing modes
+- **Input validation**: Type-specific validation for each field
+- **Apply logic**: Updates all selected recipients simultaneously
 
-  return (
-    <>
-      <YourAppContent />
-      <TransactionPendingOrb walletStatus={walletStatus} />
-    </>
-  );
+#### `RecipientGrid.tsx`
+- **Selection management**: Individual and bulk selection controls
+- **Inline editing**: Direct editing of recipient data
+- **Visual states**: Selected rows have distinct styling
+- **Responsive table**: Horizontal scrolling on mobile devices
+
+#### `page.tsx`
+- **State management**: Central recipient state management
+- **Event handling**: Comprehensive event handling for all interactions
+- **Integration**: Seamless integration between grid and bulk-edit bar
+
+### Data Flow
+
+1. **Selection**: Users select recipients via checkboxes
+2. **Bulk Bar**: Utility bar appears when 2+ are selected
+3. **Action Selection**: User chooses Amount, Asset, or Memo action
+4. **Input**: User provides the value to apply
+5. **Apply**: All selected recipients are updated simultaneously
+
+### TypeScript Interfaces
+
+```typescript
+interface Recipient {
+  id: string
+  address: string
+  amount: number
+  asset: string
+  memo: string
+  selected: boolean
 }
+
+type BulkEditAction = 'amount' | 'asset' | 'memo'
 ```
 
-## Props
+## Getting Started
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `walletStatus` | `'idle' \| 'pending' \| 'signed' \| 'rejected'` | Required | Current wallet transaction state |
-| `ariaLabel` | `string` | `'Transaction status'` | Accessible label for screen readers |
+### Prerequisites
+- Node.js 18+ 
+- npm or yarn
 
-## Wallet Status States
-
-- `idle`: No transaction, orb hidden
-- `pending`: Transaction awaiting signature, orb visible with animation
-- `signed`: Transaction signed, orb disappears immediately
-- `rejected`: Transaction rejected, orb disappears immediately
-
-## Development
+### Installation
 
 ```bash
-# Start dev server
+# Install dependencies
+npm install
+
+# Run development server
 npm run dev
-
-# Run tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
 
 # Build for production
 npm run build
 ```
 
-## Testing
+### Usage
 
-The component includes comprehensive tests covering:
+1. **Add Recipients**: Click "Add Recipient" to create new rows
+2. **Select Rows**: Use checkboxes to select multiple recipients
+3. **Bulk Edit**: The utility bar appears automatically when 2+ rows are selected
+4. **Apply Changes**: Choose an action and enter the value to apply to all selected
 
-- Visibility toggling based on wallet status
-- Content rendering (orb, text, classes)
-- Accessibility (ARIA attributes, live regions)
-- Animation state management
-- Performance and memory leak prevention
-- CSS class application
+## Bulk-Edit Features
 
-Run tests with:
-```bash
-npm test
-```
+### Amount Editing
+- **Input type**: Number with decimal support
+- **Validation**: Validates numeric input
+- **Example**: "Add 5 USDC to all selected"
 
-## Accessibility
+### Asset Editing  
+- **Input type**: Text
+- **Common values**: USDC, XLM, EURT, etc.
+- **Example**: "Set all BPS to 500"
 
-The component follows WCAG guidelines:
+### Memo Editing
+- **Input type**: Text
+- **Character limit**: No strict limit
+- **Example**: "Set memo to 'Payment Batch #123'"
 
-- Uses `role="status"` for status updates
-- Implements `aria-live="polite"` for non-intrusive announcements
-- Provides customizable `aria-label`
-- Includes screen-reader-only text updates
-- Respects `prefers-reduced-motion` for users with vestibular disorders
+## Styling
 
-## Performance Optimizations
+- **Framework**: Tailwind CSS
+- **Colors**: Primary blue theme with gray accents
+- **Responsive**: Mobile-first design approach
+- **Components**: Radix UI for accessible form controls
 
-- **CSS-only animations**: No JavaScript animation loops
-- **will-change**: Optimizes transform animations
-- **contain: layout**: Prevents layout thrashing
-- **pointer-events: none**: Non-blocking, doesn't interfere with clicks
-- **Conditional rendering**: Component unmounts when not needed
-- **No re-renders**: Minimal state updates, clean effect dependencies
+## Future Enhancements
 
-## Browser Support
+- [ ] CSV import/export functionality
+- [ ] Payment processing integration
+- [ ] Advanced filtering and sorting
+- [ ] Undo/redo functionality
+- [ ] Keyboard shortcuts
+- [ ] Batch validation before processing
 
-- Chrome/Edge 88+
-- Firefox 85+
-- Safari 14+
-- All modern browsers with CSS Grid and CSS Custom Properties support
+## Contributing
 
-## Customization
+This project follows standard Next.js and React patterns. When contributing:
 
-The component uses CSS variables and can be customized by overriding styles:
-
-```css
-.transaction-pending-orb-container {
-  bottom: 32px; /* Adjust position */
-  right: 32px;
-}
-
-.orb {
-  /* Customize colors */
-  background: radial-gradient(circle at 30% 30%, your-color-1, your-color-2);
-}
-```
+1. Follow existing code style
+2. Add TypeScript types for new props
+3. Test bulk-edit functionality thoroughly
+4. Ensure responsive design works on all devices
 
 ## License
 
-MIT
+MIT License - see LICENSE file for details

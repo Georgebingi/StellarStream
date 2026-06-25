@@ -1,165 +1,180 @@
-# Multi-Signature Proposal Implementation Summary
+# Event Watcher Service Separation - Implementation Summary
 
-## ✅ Completed Tasks
+## 🎯 Issue Resolution: #1145
 
-### 1. Proposal Storage ✓
-**File:** `contracts/src/types.rs`
+Successfully separated the Event Watcher into a dedicated microservice, resolving the critical architecture issue where blockchain event indexing ran in the same Node.js process as the Express API server.
 
-Created `StreamProposal` struct with:
-- Stream parameters (sender, receiver, token, amounts, times)
-- Approval tracking (`approvers: Vec<Address>`)
-- Threshold configuration (`required_approvals: u32`)
-- Expiry mechanism (`deadline: u64`)
-- Execution status (`executed: bool`)
+## ✅ Acceptance Criteria Met
 
-### 2. Approval Logic ✓
-**File:** `contracts/src/lib.rs`
+### 1. Event watcher runs as separate microservice on different port
+- ✅ **Created `backend/src/event-watcher.ts`** - Standalone service entry point
+- ✅ **Port 3001** - Dedicated port for event watcher service
+- ✅ **Health endpoints** - `/health` and `/metrics` for monitoring
 
-Implemented `approve_proposal(proposal_id: u64, approver: Address)`:
-- ✅ Validates proposal exists
-- ✅ Checks not already executed
-- ✅ Verifies deadline not passed
-- ✅ Prevents duplicate approvals from same address
-- ✅ Tracks all approvers in vector
-- ✅ Auto-executes when threshold reached
+### 2. Cursor state persisted to Redis with lock mechanism
+- ✅ **Redis cursor management** - `event_watcher:cursor` key for state persistence
+- ✅ **Distributed locking** - `event_watcher:lock` prevents multiple instances
+- ✅ **TTL-based locks** - 30-second TTL with automatic renewal
+- ✅ **Lock ownership tracking** - Process PID-based lock identification
 
-### 3. Activation ✓
-**File:** `contracts/src/lib.rs`
+### 3. API and watcher communicate via Redis Pub/Sub
+- ✅ **EventWatcherClient service** - Redis pub/sub listener in API server
+- ✅ **Status channel** - `event_watcher:status` for real-time updates
+- ✅ **Health monitoring endpoint** - `/event-watcher-status` in main API
 
-Implemented `execute_proposal()` (private function):
-- ✅ Automatically triggered when `approvers.len() >= required_approvals`
-- ✅ Transfers tokens from sender to contract atomically
-- ✅ Creates stream with identical logic to direct creation
-- ✅ Marks proposal as executed to prevent re-execution
+### 4. Graceful shutdown handles in-flight events
+- ✅ **Signal handlers** - SIGTERM/SIGINT handling with proper cleanup
+- ✅ **Resource cleanup** - Database connections, Redis connections, timers
+- ✅ **Lock release** - Proper distributed lock cleanup on shutdown
 
-### 4. Expiry ✓
-**Implementation:**
-- ✅ `deadline: u64` field in `StreamProposal`
-- ✅ Validation in `approve_proposal()` rejects expired proposals
-- ✅ Checked on every approval attempt
-- ✅ Error: `Error::ProposalExpired`
+### 5. Docker-compose includes both services
+- ✅ **Updated docker-compose.yml** - Added event-watcher service
+- ✅ **Separate Dockerfiles** - `Dockerfile` (API) and `Dockerfile.event-watcher`
+- ✅ **Health checks** - Container-level health monitoring
+- ✅ **Environment variables** - Proper configuration management
 
-## 🎯 Acceptance Criteria Met
+### 6. End-to-end test verifies event processing latency < 3 seconds
+- ✅ **Comprehensive E2E test suite** - `event-watcher-separation.e2e.test.ts`
+- ✅ **Performance requirements** - Tests for < 3 second processing latency
+- ✅ **Service isolation tests** - Distributed locking verification
+- ✅ **Communication tests** - Redis pub/sub functionality
 
-### ✅ Multi-sig Flag Behavior
-- Streams created via proposals require M-of-N approvals
-- Direct `create_stream()` still available for single-signature flows
-- Both paths produce identical `Stream` objects
+### 7. Monitoring dashboard shows watcher health separately
+- ✅ **Monitoring documentation** - `MONITORING.md` with full setup guide
+- ✅ **Prometheus metrics** - Compatible `/metrics` endpoint
+- ✅ **Health status tracking** - Service uptime, processing latency
+- ✅ **Alerting guidelines** - Critical and warning alert configurations
 
-### ✅ Token Safety
-- Tokens only transferred upon final activation
-- No tokens moved during proposal creation
-- Atomic execution prevents partial states
+## 🏗️ Architecture Changes
 
-### ✅ Test Coverage
-**File:** `contracts/src/lib.rs` (test module)
-
-11 comprehensive tests:
-1. ✅ `test_create_proposal` - Basic proposal creation
-2. ✅ `test_approve_proposal` - 2-of-N approval flow
-3. ✅ `test_duplicate_approval_fails` - Prevents double voting
-4. ✅ `test_proposal_not_found` - Invalid ID handling
-5. ✅ `test_invalid_time_range` - Time validation
-6. ✅ `test_invalid_amount` - Amount validation
-7. ✅ `test_invalid_approval_threshold` - Threshold validation
-8. ✅ `test_create_direct_stream` - Single-sig path still works
-9. ✅ `test_three_of_five_multisig` - 3-of-5 DAO scenario
-10. ✅ `test_approve_already_executed_proposal` - Post-execution protection
-11. ✅ Expiry validation (implicit in approval logic)
-
-### ✅ CI/CD Compatibility
-**Checks:**
-- `cargo fmt --all -- --check` ✓ (formatted)
-- `cargo clippy -- -D warnings` ✓ (no warnings)
-- `cargo test` ✓ (11 tests pass)
-
-**Files:**
-- `.github/workflows/rust-ci.yml` - Existing CI pipeline
-- `.github/workflows/scout-audit.yml` - Security audit
-- `scripts/ci-check.sh` - Local validation script
-
-## 📁 Files Created/Modified
-
-### Created:
-1. `contracts/src/types.rs` - Data structures
-2. `contracts/src/errors.rs` - Error definitions
-3. `contracts/src/storage.rs` - Storage keys
-4. `contracts/MULTISIG_PROPOSAL.md` - Feature documentation
-5. `scripts/ci-check.sh` - Local CI validation
-
-### Modified:
-1. `contracts/src/lib.rs` - Complete contract implementation
-
-## 🔒 Security Features
-
-1. **No Double Approval**: Each address can only approve once
-2. **Deadline Enforcement**: Expired proposals cannot be approved
-3. **Atomic Execution**: Token transfer + stream creation in single transaction
-4. **Authorization**: All functions require `require_auth()`
-5. **Execution Lock**: Executed proposals cannot be re-executed
-
-## 📊 Error Handling
-
-| Error Code | Name | Scenario |
-|------------|------|----------|
-| 8 | ProposalNotFound | Invalid proposal ID |
-| 9 | ProposalExpired | Current time > deadline |
-| 10 | AlreadyApproved | Duplicate approval attempt |
-| 11 | ProposalAlreadyExecuted | Approving executed proposal |
-| 12 | InvalidApprovalThreshold | required_approvals = 0 |
-
-## 🚀 Usage Example
-
-```rust
-// DAO creates proposal for contractor payment
-let proposal_id = contract.create_proposal(
-    dao_treasury,
-    contractor,
-    usdc_token,
-    50_000_0000000,  // 50k USDC
-    start_time,
-    end_time,
-    3,               // 3-of-5 multisig
-    deadline
-);
-
-// Board members approve
-contract.approve_proposal(proposal_id, board_member_1);
-contract.approve_proposal(proposal_id, board_member_2);
-contract.approve_proposal(proposal_id, board_member_3);  // ✅ Stream created!
+### Before (Monolithic)
+```
+┌─────────────────────────────────────────┐
+│           Node.js Process               │
+│  ┌─────────────────────────────────────┐│
+│  │          Express API                ││
+│  │  ┌─────────────────────────────────┐││
+│  │  │       V3SplitIngestor          │││
+│  │  │   (Event Processing)           │││
+│  │  └─────────────────────────────────┘││
+│  └─────────────────────────────────────┘│
+└─────────────────────────────────────────┘
 ```
 
-## 🧪 Running Tests Locally
+### After (Microservices)
+```
+┌────────────────────────────────┐    ┌──────────────────────────────────┐
+│     Node.js Process (API)      │    │   Node.js Process (Watcher)     │
+│  ┌──────────────────────────┐  │    │ ┌──────────────────────────────┐ │
+│  │      Express API         │  │    │ │    EventWatcherService       │ │
+│  │ ┌──────────────────────┐ │  │    │ │ ┌──────────────────────────┐ │ │
+│  │ │ EventWatcherClient   │ │◄─┼────┼─┤ │    V3SplitIngestor       │ │ │
+│  │ │  (Redis Pub/Sub)     │ │  │    │ │ │  (Event Processing)      │ │ │
+│  │ └──────────────────────┘ │  │    │ │ └──────────────────────────┘ │ │
+│  └──────────────────────────┘  │    │ └──────────────────────────────┘ │
+└────────────────────────────────┘    └──────────────────────────────────┘
+               │                                        │
+               └───────────► Redis ◄────────────────────┘
+                         (Cursor State + Pub/Sub)
+```
 
+## 📂 Files Created/Modified
+
+### New Files
+- `backend/src/event-watcher.ts` - Standalone event watcher service
+- `backend/src/services/event-watcher.service.ts` - Core event watcher logic
+- `backend/src/services/event-watcher-client.service.ts` - API client for communication
+- `backend/src/__tests__/event-watcher-separation.e2e.test.ts` - E2E tests
+- `backend/Dockerfile` - Main API service container
+- `backend/Dockerfile.event-watcher` - Event watcher service container
+- `backend/MONITORING.md` - Monitoring and alerting guide
+
+### Modified Files
+- `backend/src/index.ts` - Removed V3SplitIngestor, added EventWatcherClient
+- `backend/ecosystem.config.cjs` - PM2 configuration for both services
+- `docker-compose.yml` - Added event watcher service
+- `backend/package.json` - Added scripts for event watcher management
+- `backend/src/lib/redis.ts` - Fixed Redis import and type issues
+
+## 🚀 Deployment & Operations
+
+### Development
 ```bash
-# Run all checks (format, clippy, tests)
-./scripts/ci-check.sh
+# Start both services in development
+npm run dev              # API server (port 3000)
+npm run dev:watcher      # Event watcher (port 3001)
 
-# Or individually:
-cd contracts
-cargo fmt --all -- --check
-cargo clippy -- -D warnings
-cargo test
+# Or start both together
+npm run start:both
 ```
 
-## 📈 Gas Optimization
+### Production (PM2)
+```bash
+# Start all services
+npm run pm2:start
 
-- Approver list: `Vec<Address>` (efficient for M < 10)
-- No loops in critical path
-- O(n) duplicate check where n = current approvers
-- Minimal storage overhead
+# Monitor services
+pm2 status
+pm2 logs stellarstream-api
+pm2 logs stellarstream-event-watcher
+```
 
-## 🔮 Future Enhancements
+### Docker Compose
+```bash
+# Start all services
+docker-compose up -d
 
-1. Role-based approvals (e.g., "CFO + 2 board members")
-2. Weighted voting (different approval weights)
-3. Proposal cancellation by creator
-4. Batch proposals (multiple streams)
-5. Proposal cleanup after execution
+# Check health status
+curl http://localhost:3000/event-watcher-status
+curl http://localhost:3001/health
+```
 
----
+## 🔍 Monitoring & Health Checks
 
-**Status:** ✅ Ready for review and merge
-**CI/CD:** ✅ All checks pass
-**Documentation:** ✅ Complete
-**Tests:** ✅ 11 tests covering all scenarios
+### Health Endpoints
+- **API Service**: `http://localhost:3000/event-watcher-status`
+- **Event Watcher**: `http://localhost:3001/health`
+- **Metrics**: `http://localhost:3001/metrics` (Prometheus format)
+
+### Key Metrics
+- `event_watcher_running` - Service running status
+- `event_watcher_last_processed_ledger` - Processing progress
+- `event_watcher_health_status` - Overall health
+- Processing latency tracking
+
+## 🎯 Benefits Achieved
+
+### Performance
+- ✅ **CPU isolation** - API traffic can't starve event processing
+- ✅ **Independent scaling** - Scale API and event processing separately
+- ✅ **Fault tolerance** - Event watcher crashes don't affect API
+
+### Reliability
+- ✅ **Single point of failure eliminated** - Services can restart independently
+- ✅ **Distributed locking** - Prevents multiple event watcher instances
+- ✅ **State persistence** - Cursor state survives restarts
+
+### Operations
+- ✅ **Independent monitoring** - Separate health checks and metrics
+- ✅ **Granular alerting** - Service-specific alert rules
+- ✅ **Container orchestration** - Docker-compose ready for production
+
+## 🧪 Testing
+
+The E2E test suite validates:
+- Service isolation and distributed locking
+- Redis pub/sub communication
+- Processing latency requirements (< 3 seconds)
+- Graceful shutdown behavior
+- Health check endpoints
+- Docker composition compatibility
+
+## 🎉 Issue #1145 Resolution
+
+This implementation successfully addresses all the critical issues identified:
+
+1. ❌ **High API traffic starving event watcher** → ✅ **Separate processes with CPU isolation**
+2. ❌ **Event watcher crashes taking down API** → ✅ **Independent service lifecycle**  
+3. ❌ **Inefficient scaling** → ✅ **Independent horizontal scaling capability**
+
+The event watcher now runs as a dedicated microservice with proper monitoring, state management, and fault tolerance, meeting all acceptance criteria for the 8-hour effort estimate.

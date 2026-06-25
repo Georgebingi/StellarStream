@@ -52,6 +52,12 @@ export interface ReceiptMetadata {
   receiver: string;
 }
 
+export interface OrphanBalance {
+  assetCode: string;
+  assetIssuer?: string;
+  balance: bigint;
+}
+
 export type CurveType = "Linear" | "Exponential";
 
 export type Role = "Admin" | "Pauser" | "TreasuryManager";
@@ -131,6 +137,18 @@ export interface RestrictAddressParams {
 
 export interface UnrestrictAddressParams {
   address: string;
+}
+
+export interface DepositGasBufferParams {
+  amount: bigint;
+  /** Caller / payer address */
+  from: string;
+}
+
+export interface WithdrawGasBufferParams {
+  amount: bigint;
+  /** Destination address for the withdrawn XLM */
+  to: string;
 }
 
 // ============================================================================
@@ -226,6 +244,25 @@ export interface StellarStreamContractClient {
    */
   claimReceipt(streamId: bigint): Promise<void>;
 
+  // ========== Gas Buffer Functions ==========
+
+  /**
+   * Deposit XLM into the organisation's gas buffer.
+   * TreasuryManager or Admin only.
+   */
+  depositGasBuffer(params: DepositGasBufferParams): Promise<void>;
+
+  /**
+   * Withdraw XLM from the organisation's gas buffer.
+   * TreasuryManager or Admin only.
+   */
+  withdrawGasBuffer(params: WithdrawGasBufferParams): Promise<void>;
+
+  /**
+   * Query the current gas buffer balance in stroops.
+   */
+  getGasBufferBalance(): Promise<bigint>;
+
   // ========== RBAC Functions ==========
 
   /**
@@ -281,6 +318,16 @@ export interface StellarStreamContractClient {
     version: string;
     description: string;
   }>;
+
+  /**
+   * Get all unallocated "dust" balances in the contract
+   */
+  getOrphanBalances(): Promise<OrphanBalance[]>;
+
+  /**
+   * Reclaim unallocated dust to a destination address (Admin only)
+   */
+  reclaimDust(params: { destination: string }): Promise<void>;
 }
 
 // ============================================================================
@@ -368,4 +415,12 @@ export const mockClient: StellarStreamContractClient = {
     description:
       "Token streaming with multi-sig proposals, dynamic vesting curves, and OFAC compliance",
   }),
+  getOrphanBalances: async () => [
+    { assetCode: "USDC", assetIssuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335XOP3IA2Y35Y5W5T37M3FSXYO", balance: BigInt("1234567") },
+    { assetCode: "XLM", balance: BigInt("450000000") },
+  ],
+  reclaimDust: async () => {},
+  depositGasBuffer: async () => {},
+  withdrawGasBuffer: async () => {},
+  getGasBufferBalance: async () => BigInt(0),
 };
